@@ -32,17 +32,25 @@ async def _grab_member_messages(
     *,
     channel: discord.TextChannel | discord.Thread,
     member: discord.Member,
+    count: int,
 ) -> GrabResult:
     matched: list[discord.Message] = []
     scanned = 0
 
-    # Scan full channel history to collect all messages from this member.
-    async for msg in channel.history(limit=None, oldest_first=True):
+    # count=0 means collect all messages from this member in this channel.
+    # For a limited count, iterate newest->oldest to finish faster.
+    oldest_first = count == 0
+    async for msg in channel.history(limit=None, oldest_first=oldest_first):
         scanned += 1
         if msg.author.id != member.id:
             continue
 
         matched.append(msg)
+        if count > 0 and len(matched) >= count:
+            break
+
+    if count > 0:
+        matched.reverse()  # keep output chronological
 
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
@@ -74,12 +82,14 @@ class AdminCog(commands.Cog):
     @app_commands.check(_is_admin)
     @app_commands.describe(
         member="Member to export messages from",
+        count="How many messages to export (0 = all)",
         channel="Channel to scan (defaults to current channel)",
     )
     async def grabmessages(
         self,
         interaction: discord.Interaction,
         member: discord.Member,
+        count: app_commands.Range[int, 0, 100000],
         channel: Optional[discord.TextChannel] = None,
     ) -> None:
         if not interaction.guild:
@@ -98,6 +108,7 @@ class AdminCog(commands.Cog):
             result = await _grab_member_messages(
                 channel=target_channel,
                 member=member,
+                count=count,
             )
         except discord.Forbidden:
             await interaction.followup.send(
