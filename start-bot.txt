@@ -1,5 +1,8 @@
 ## Oreo bot (PowerShell)
-## Copy/paste the commands below into a terminal in the repo folder.
+## Copy/paste the commands below into a terminal (any folder).
+
+# 0) Ensure we're in this repo folder
+Set-Location -Path "$env:USERPROFILE\.vscode\Oreo-green-bean-casserole-bot"
 
 # 1) (Optional) create a virtual environment once
 python -m venv .venv
