@@ -32,71 +32,25 @@ async def _grab_member_messages(
     *,
     channel: discord.TextChannel | discord.Thread,
     member: discord.Member,
-    count: int,
-    scan_limit: int,
-    include_attachments: bool,
-    include_metadata: bool,
 ) -> GrabResult:
     matched: list[discord.Message] = []
     scanned = 0
 
-    async for msg in channel.history(limit=scan_limit, oldest_first=False):
+    # Scan full channel history to collect all messages from this member.
+    async for msg in channel.history(limit=None, oldest_first=True):
         scanned += 1
         if msg.author.id != member.id:
             continue
 
         matched.append(msg)
-        if len(matched) >= count:
-            break
-
-    matched.reverse()  # oldest -> newest in output
 
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    if include_metadata:
-        header = [
-            f"guild_id={getattr(channel.guild, 'id', 'unknown')}",
-            f"channel_id={channel.id}",
-            f"channel_name=#{getattr(channel, 'name', 'unknown')}",
-            f"member_id={member.id}",
-            f"member_tag={member}",
-            f"requested_count={count}",
-            f"scan_limit={scan_limit}",
-            f"scanned={scanned}",
-            f"matched={len(matched)}",
-            f"generated_at_utc={now}",
-            "",
-            "---",
-            "",
-        ]
-        lines.extend(header)
-
     for msg in matched:
-        # Use raw message content for speed; clean_content does extra formatting work.
-        content = msg.content or ""
-        if include_metadata:
-            created = msg.created_at.replace(tzinfo=timezone.utc).isoformat()
-            lines.append(f"[{created}] {msg.author} (id={msg.author.id})")
-            lines.append(content if content else "(no text content)")
-        elif content:
-            lines.append(content)
-        else:
+        content = (msg.content or "").replace("\r", " ").replace("\n", " ").strip()
+        if not content:
             continue
-
-        if include_metadata and include_attachments and msg.attachments:
-            lines.append("")
-            lines.append("attachments:")
-            for a in msg.attachments:
-                lines.append(f"- {a.filename} ({a.content_type or 'unknown'}) {a.url}")
-
-        if include_metadata and msg.embeds:
-            lines.append("")
-            lines.append(f"embeds: {len(msg.embeds)}")
-
-        if include_metadata:
-            lines.append("")
-            lines.append("---")
-            lines.append("")
+        lines.append(content)
 
     text = "\n".join(lines).strip() + "\n"
     filename = f"messages_{member.id}_{channel.id}_{now}.txt"
@@ -120,21 +74,13 @@ class AdminCog(commands.Cog):
     @app_commands.check(_is_admin)
     @app_commands.describe(
         member="Member to export messages from",
-        count="How many messages to export (1-500)",
         channel="Channel to scan (defaults to current channel)",
-        scan_limit="How many recent messages to scan (defaults to count*15, max 5000)",
-        include_attachments="Include attachment URLs in the export",
-        include_metadata="Include timestamps/IDs and other metadata in the export",
     )
     async def grabmessages(
         self,
         interaction: discord.Interaction,
         member: discord.Member,
-        count: app_commands.Range[int, 1, 500],
         channel: Optional[discord.TextChannel] = None,
-        scan_limit: Optional[app_commands.Range[int, 50, 5000]] = None,
-        include_attachments: bool = True,
-        include_metadata: bool = False,
     ) -> None:
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
@@ -147,30 +93,23 @@ class AdminCog(commands.Cog):
             )
             return
 
-        # Lower default scan window for faster responses.
-        effective_scan_limit = scan_limit or min(5000, max(50, count * 15))
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=False, thinking=True)
         try:
             result = await _grab_member_messages(
                 channel=target_channel,
                 member=member,
-                count=count,
-                scan_limit=effective_scan_limit,
-                include_attachments=include_attachments,
-                include_metadata=include_metadata,
             )
         except discord.Forbidden:
             await interaction.followup.send(
-                "I don't have permission to read message history in that channel.", ephemeral=True
+                "I don't have permission to read message history in that channel.", ephemeral=False
             )
             return
 
         file_obj = io.BytesIO(result.content)
         await interaction.followup.send(
-            content=f"Exported **{result.matched}** messages (scanned {result.scanned}).",
+            content=f"Exported {result.matched} messages from {member.mention}.",
             file=discord.File(fp=file_obj, filename=result.filename),
-            ephemeral=True,
+            ephemeral=False,
         )
 
     @app_commands.command(name="reload", description="Reload the bot's slash-command modules.")
