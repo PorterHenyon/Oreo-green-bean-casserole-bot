@@ -128,31 +128,51 @@ async def _grab_member_messages(
     member: discord.Member,
     count: int,
 ) -> GrabResult:
+    # Fast path for limited exports: scan newest messages and stop early.
+    if count > 0:
+        scanned = 0
+        lines: list[str] = []
+        async for msg in channel.history(limit=None, oldest_first=False):
+            scanned += 1
+            if msg.author.id != member.id:
+                continue
+            content = _normalize_message_text(msg.content or "")
+            if not content:
+                continue
+            lines.append(content)
+            if len(lines) >= count:
+                break
+
+        lines.reverse()  # chronological in output
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+        output_lines = [
+            f"member_name={member}",
+            f"member_id={member.id}",
+            "",
+            *lines,
+        ]
+        text = "\n".join(output_lines).strip() + "\n"
+        filename = f"messages_{member.id}_{channel.id}_{now}.txt"
+        return GrabResult(
+            filename=filename,
+            content=text.encode("utf-8", errors="replace"),
+            matched=len(lines),
+            scanned=scanned,
+        )
+
+    # count=0 path: full export via indexed store.
     conn = _get_db()
     try:
         scanned = await _sync_channel_index(conn, channel)
-        if count == 0:
-            cur = conn.execute(
-                """
-                SELECT content FROM indexed_messages
-                WHERE channel_id = ? AND author_id = ?
-                ORDER BY message_id ASC
-                """,
-                (channel.id, member.id),
-            )
-            lines = [r[0] for r in cur.fetchall()]
-        else:
-            cur = conn.execute(
-                """
-                SELECT content FROM indexed_messages
-                WHERE channel_id = ? AND author_id = ?
-                ORDER BY message_id DESC
-                LIMIT ?
-                """,
-                (channel.id, member.id, count),
-            )
-            lines = [r[0] for r in cur.fetchall()]
-            lines.reverse()
+        cur = conn.execute(
+            """
+            SELECT content FROM indexed_messages
+            WHERE channel_id = ? AND author_id = ?
+            ORDER BY message_id ASC
+            """,
+            (channel.id, member.id),
+        )
+        lines = [r[0] for r in cur.fetchall()]
     finally:
         conn.close()
 
