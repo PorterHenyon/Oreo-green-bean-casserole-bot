@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import sqlite3
 from dataclasses import dataclass
@@ -33,7 +34,8 @@ class GrabResult:
 
 def _get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    # Long timeout avoids "database is locked" when another export holds WAL briefly.
+    conn = sqlite3.connect(str(DB_PATH), timeout=60.0, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute(
@@ -127,6 +129,7 @@ async def _grab_member_messages(
     channel: discord.TextChannel | discord.Thread,
     member: discord.Member,
     count: int,
+    db_lock: asyncio.Lock,
 ) -> GrabResult:
     # Fast path for limited exports: scan newest messages and stop early.
     if count > 0:
@@ -160,21 +163,22 @@ async def _grab_member_messages(
             scanned=scanned,
         )
 
-    # count=0 path: full export via indexed store.
-    conn = _get_db()
-    try:
-        scanned = await _sync_channel_index(conn, channel)
-        cur = conn.execute(
-            """
-            SELECT content FROM indexed_messages
-            WHERE channel_id = ? AND author_id = ?
-            ORDER BY message_id ASC
-            """,
-            (channel.id, member.id),
-        )
-        lines = [r[0] for r in cur.fetchall()]
-    finally:
-        conn.close()
+    # count=0 path: full export via indexed store (serialize — concurrent runs caused DB locks).
+    async with db_lock:
+        conn = _get_db()
+        try:
+            scanned = await _sync_channel_index(conn, channel)
+            cur = conn.execute(
+                """
+                SELECT content FROM indexed_messages
+                WHERE channel_id = ? AND author_id = ?
+                ORDER BY message_id ASC
+                """,
+                (channel.id, member.id),
+            )
+            lines = [r[0] for r in cur.fetchall()]
+        finally:
+            conn.close()
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     output_lines = [
@@ -196,6 +200,7 @@ async def _grab_member_messages(
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._message_db_lock = asyncio.Lock()
 
     @app_commands.command(
         name="grabmessages",
@@ -232,10 +237,24 @@ class AdminCog(commands.Cog):
                 channel=target_channel,
                 member=member,
                 count=count,
+                db_lock=self._message_db_lock,
             )
         except discord.Forbidden:
             await interaction.followup.send(
                 "I don't have permission to read message history in that channel.", ephemeral=False
+            )
+            return
+        except sqlite3.OperationalError as e:
+            await interaction.followup.send(
+                "Database was busy (another export may be running). Wait a few seconds and try again. "
+                f"Details: {e}",
+                ephemeral=False,
+            )
+            return
+        except Exception as e:  # noqa: BLE001
+            await interaction.followup.send(
+                f"Export failed: {type(e).__name__}: {e}",
+                ephemeral=False,
             )
             return
 
@@ -283,10 +302,18 @@ class AdminCog(commands.Cog):
                 await interaction.response.send_message("Admin-only command.", ephemeral=True)
             return
 
+        cause = getattr(error, "original", None)
+        msg = f"{type(error).__name__}: {error}"
+        if cause is not None:
+            msg = f"{type(cause).__name__}: {cause}"
+
         if interaction.response.is_done():
-            await interaction.followup.send(f"Error: {type(error).__name__}: {error}", ephemeral=True)
+            try:
+                await interaction.followup.send(f"Error: {msg}", ephemeral=True)
+            except discord.HTTPException:
+                pass
         else:
-            await interaction.response.send_message(f"Error: {type(error).__name__}: {error}", ephemeral=True)
+            await interaction.response.send_message(f"Error: {msg}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
