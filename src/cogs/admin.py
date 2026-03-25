@@ -9,6 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+OREOS_GUILD = discord.Object(id=1354116143950073896)
+
 
 def _is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
@@ -33,6 +35,7 @@ async def _grab_member_messages(
     count: int,
     scan_limit: int,
     include_attachments: bool,
+    include_metadata: bool,
 ) -> GrabResult:
     matched: list[discord.Message] = []
     scanned = 0
@@ -50,45 +53,49 @@ async def _grab_member_messages(
 
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    header = [
-        f"guild_id={getattr(channel.guild, 'id', 'unknown')}",
-        f"channel_id={channel.id}",
-        f"channel_name=#{getattr(channel, 'name', 'unknown')}",
-        f"member_id={member.id}",
-        f"member_tag={member}",
-        f"requested_count={count}",
-        f"scan_limit={scan_limit}",
-        f"scanned={scanned}",
-        f"matched={len(matched)}",
-        f"generated_at_utc={now}",
-        "",
-        "---",
-        "",
-    ]
-    lines.extend(header)
+    if include_metadata:
+        header = [
+            f"guild_id={getattr(channel.guild, 'id', 'unknown')}",
+            f"channel_id={channel.id}",
+            f"channel_name=#{getattr(channel, 'name', 'unknown')}",
+            f"member_id={member.id}",
+            f"member_tag={member}",
+            f"requested_count={count}",
+            f"scan_limit={scan_limit}",
+            f"scanned={scanned}",
+            f"matched={len(matched)}",
+            f"generated_at_utc={now}",
+            "",
+            "---",
+            "",
+        ]
+        lines.extend(header)
 
     for msg in matched:
         created = msg.created_at.replace(tzinfo=timezone.utc).isoformat()
         content = msg.clean_content or ""
-        lines.append(f"[{created}] {msg.author} (id={msg.author.id})")
-        if content:
+        if include_metadata:
+            lines.append(f"[{created}] {msg.author} (id={msg.author.id})")
+            lines.append(content if content else "(no text content)")
+        elif content:
             lines.append(content)
         else:
-            lines.append("(no text content)")
+            continue
 
-        if include_attachments and msg.attachments:
+        if include_metadata and include_attachments and msg.attachments:
             lines.append("")
             lines.append("attachments:")
             for a in msg.attachments:
                 lines.append(f"- {a.filename} ({a.content_type or 'unknown'}) {a.url}")
 
-        if msg.embeds:
+        if include_metadata and msg.embeds:
             lines.append("")
             lines.append(f"embeds: {len(msg.embeds)}")
 
-        lines.append("")
-        lines.append("---")
-        lines.append("")
+        if include_metadata:
+            lines.append("")
+            lines.append("---")
+            lines.append("")
 
     text = "\n".join(lines).strip() + "\n"
     filename = f"messages_{member.id}_{channel.id}_{now}.txt"
@@ -108,6 +115,7 @@ class AdminCog(commands.Cog):
         name="grabmessages",
         description="Export previous messages from a specific member into a .txt file.",
     )
+    @app_commands.guilds(OREOS_GUILD)
     @app_commands.check(_is_admin)
     @app_commands.describe(
         member="Member to export messages from",
@@ -115,6 +123,7 @@ class AdminCog(commands.Cog):
         channel="Channel to scan (defaults to current channel)",
         scan_limit="How many recent messages to scan (defaults to count*50, max 5000)",
         include_attachments="Include attachment URLs in the export",
+        include_metadata="Include timestamps/IDs and other metadata in the export",
     )
     async def grabmessages(
         self,
@@ -124,6 +133,7 @@ class AdminCog(commands.Cog):
         channel: Optional[discord.TextChannel] = None,
         scan_limit: Optional[app_commands.Range[int, 50, 5000]] = None,
         include_attachments: bool = True,
+        include_metadata: bool = False,
     ) -> None:
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
@@ -146,6 +156,7 @@ class AdminCog(commands.Cog):
                 count=count,
                 scan_limit=effective_scan_limit,
                 include_attachments=include_attachments,
+                include_metadata=include_metadata,
             )
         except discord.Forbidden:
             await interaction.followup.send(
@@ -161,6 +172,7 @@ class AdminCog(commands.Cog):
         )
 
     @app_commands.command(name="reload", description="Reload the bot's slash-command modules.")
+    @app_commands.guilds(OREOS_GUILD)
     @app_commands.check(_is_admin)
     async def reload(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -179,6 +191,7 @@ class AdminCog(commands.Cog):
             await interaction.followup.send("Reloaded successfully.", ephemeral=True)
 
     @app_commands.command(name="stop", description="Stop the bot process.")
+    @app_commands.guilds(OREOS_GUILD)
     @app_commands.check(_is_admin)
     async def stop(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Stopping bot...", ephemeral=True)

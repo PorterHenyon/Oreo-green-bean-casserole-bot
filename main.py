@@ -7,7 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 def _require_env(name: str) -> str:
@@ -38,12 +38,15 @@ class OreoBot(commands.Bot):
             await self.load_extension(ext)
 
         guild = discord.Object(id=self.guild_id)
-        self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
+        synced = await self.tree.sync(guild=guild)
+        print(
+            f"Synced {len(synced)} command(s) to guild {self.guild_id}: {[c.name for c in synced]}",
+            flush=True,
+        )
 
     async def on_ready(self) -> None:
         assert self.user is not None
-        print(f"Logged in as {self.user} (id={self.user.id})")
+        print(f"Logged in as {self.user} (id={self.user.id})", flush=True)
 
 
 async def main() -> None:
