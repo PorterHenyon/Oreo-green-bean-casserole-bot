@@ -1,0 +1,15 @@
+## Oreo bot (PowerShell)
+## Copy/paste the commands below into a terminal in the repo folder.
+
+# 1) (Optional) create a virtual environment once
+python -m venv .venv
+
+# 2) Activate it (each new terminal session)
+.\.venv\Scripts\Activate.ps1
+
+# 3) Install/update dependencies
+python -m pip install -r requirements.txt
+
+# 4) Run the bot
+python main.py
+
