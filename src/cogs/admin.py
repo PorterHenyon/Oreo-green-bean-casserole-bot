@@ -157,7 +157,13 @@ async def _grab_member_messages(
         conn.close()
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    text = "\n".join(lines).strip() + "\n"
+    output_lines = [
+        f"member_name={member}",
+        f"member_id={member.id}",
+        "",
+        *lines,
+    ]
+    text = "\n".join(output_lines).strip() + "\n"
     filename = f"messages_{member.id}_{channel.id}_{now}.txt"
     return GrabResult(
         filename=filename,
