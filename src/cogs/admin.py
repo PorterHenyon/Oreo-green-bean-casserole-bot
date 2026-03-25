@@ -72,9 +72,10 @@ async def _grab_member_messages(
         lines.extend(header)
 
     for msg in matched:
-        created = msg.created_at.replace(tzinfo=timezone.utc).isoformat()
-        content = msg.clean_content or ""
+        # Use raw message content for speed; clean_content does extra formatting work.
+        content = msg.content or ""
         if include_metadata:
+            created = msg.created_at.replace(tzinfo=timezone.utc).isoformat()
             lines.append(f"[{created}] {msg.author} (id={msg.author.id})")
             lines.append(content if content else "(no text content)")
         elif content:
@@ -121,7 +122,7 @@ class AdminCog(commands.Cog):
         member="Member to export messages from",
         count="How many messages to export (1-500)",
         channel="Channel to scan (defaults to current channel)",
-        scan_limit="How many recent messages to scan (defaults to count*50, max 5000)",
+        scan_limit="How many recent messages to scan (defaults to count*15, max 5000)",
         include_attachments="Include attachment URLs in the export",
         include_metadata="Include timestamps/IDs and other metadata in the export",
     )
@@ -146,7 +147,8 @@ class AdminCog(commands.Cog):
             )
             return
 
-        effective_scan_limit = scan_limit or min(5000, max(50, count * 50))
+        # Lower default scan window for faster responses.
+        effective_scan_limit = scan_limit or min(5000, max(50, count * 15))
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
