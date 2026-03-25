@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -10,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 OREOS_GUILD = discord.Object(id=1354116143950073896)
+DB_PATH = Path("data/messages.db")
 
 
 def _is_admin(interaction: discord.Interaction) -> bool:
@@ -28,44 +31,138 @@ class GrabResult:
     scanned: int
 
 
+def _get_db() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS indexed_messages (
+            message_id INTEGER PRIMARY KEY,
+            channel_id INTEGER NOT NULL,
+            author_id INTEGER NOT NULL,
+            content TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_channel_author_msg
+        ON indexed_messages(channel_id, author_id, message_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS channel_sync_state (
+            channel_id INTEGER PRIMARY KEY,
+            last_message_id INTEGER NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def _normalize_message_text(text: str) -> str:
+    return text.replace("\r", " ").replace("\n", " ").strip()
+
+
+async def _sync_channel_index(
+    conn: sqlite3.Connection, channel: discord.TextChannel | discord.Thread
+) -> int:
+    cur = conn.execute(
+        "SELECT last_message_id FROM channel_sync_state WHERE channel_id = ?",
+        (channel.id,),
+    )
+    row = cur.fetchone()
+    after_obj = discord.Object(id=int(row[0])) if row else None
+
+    scanned = 0
+    highest_id = int(row[0]) if row else 0
+    batch: list[tuple[int, int, int, str]] = []
+
+    async for msg in channel.history(limit=None, oldest_first=True, after=after_obj):
+        scanned += 1
+        highest_id = max(highest_id, msg.id)
+        content = _normalize_message_text(msg.content or "")
+        if not content:
+            continue
+        batch.append((msg.id, channel.id, msg.author.id, content))
+
+        if len(batch) >= 1000:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO indexed_messages(message_id, channel_id, author_id, content)
+                VALUES(?, ?, ?, ?)
+                """,
+                batch,
+            )
+            batch.clear()
+
+    if batch:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO indexed_messages(message_id, channel_id, author_id, content)
+            VALUES(?, ?, ?, ?)
+            """,
+            batch,
+        )
+
+    if highest_id > 0:
+        conn.execute(
+            """
+            INSERT INTO channel_sync_state(channel_id, last_message_id)
+            VALUES(?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET last_message_id=excluded.last_message_id
+            """,
+            (channel.id, highest_id),
+        )
+    conn.commit()
+    return scanned
+
+
 async def _grab_member_messages(
     *,
     channel: discord.TextChannel | discord.Thread,
     member: discord.Member,
     count: int,
 ) -> GrabResult:
-    matched: list[discord.Message] = []
-    scanned = 0
+    conn = _get_db()
+    try:
+        scanned = await _sync_channel_index(conn, channel)
+        if count == 0:
+            cur = conn.execute(
+                """
+                SELECT content FROM indexed_messages
+                WHERE channel_id = ? AND author_id = ?
+                ORDER BY message_id ASC
+                """,
+                (channel.id, member.id),
+            )
+            lines = [r[0] for r in cur.fetchall()]
+        else:
+            cur = conn.execute(
+                """
+                SELECT content FROM indexed_messages
+                WHERE channel_id = ? AND author_id = ?
+                ORDER BY message_id DESC
+                LIMIT ?
+                """,
+                (channel.id, member.id, count),
+            )
+            lines = [r[0] for r in cur.fetchall()]
+            lines.reverse()
+    finally:
+        conn.close()
 
-    # count=0 means collect all messages from this member in this channel.
-    # For a limited count, iterate newest->oldest to finish faster.
-    oldest_first = count == 0
-    async for msg in channel.history(limit=None, oldest_first=oldest_first):
-        scanned += 1
-        if msg.author.id != member.id:
-            continue
-
-        matched.append(msg)
-        if count > 0 and len(matched) >= count:
-            break
-
-    if count > 0:
-        matched.reverse()  # keep output chronological
-
-    lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    for msg in matched:
-        content = (msg.content or "").replace("\r", " ").replace("\n", " ").strip()
-        if not content:
-            continue
-        lines.append(content)
-
     text = "\n".join(lines).strip() + "\n"
     filename = f"messages_{member.id}_{channel.id}_{now}.txt"
     return GrabResult(
         filename=filename,
         content=text.encode("utf-8", errors="replace"),
-        matched=len(matched),
+        matched=len(lines),
         scanned=scanned,
     )
 
