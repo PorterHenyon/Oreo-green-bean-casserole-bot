@@ -202,6 +202,11 @@ class AdminCog(commands.Cog):
         self.bot = bot
         self._message_db_lock = asyncio.Lock()
 
+    async def _shutdown_bot(self) -> None:
+        # Small delay gives Discord time to receive the ack/followup.
+        await asyncio.sleep(0.3)
+        await self.bot.close()
+
     @app_commands.command(
         name="grabmessages",
         description="Export previous messages from a specific member into a .txt file.",
@@ -288,8 +293,16 @@ class AdminCog(commands.Cog):
     @app_commands.guilds(OREOS_GUILD)
     @app_commands.check(_is_admin)
     async def stop(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message("Stopping bot...", ephemeral=True)
-        await self.bot.close()
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=False)
+
+        try:
+            await interaction.followup.send("Stopping bot...", ephemeral=True)
+        except discord.HTTPException:
+            # Even if reply fails/expired, still stop the process.
+            pass
+
+        asyncio.create_task(self._shutdown_bot())
 
     @grabmessages.error
     @reload.error
